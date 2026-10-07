@@ -61,4 +61,6 @@ This README lays out the pipeline in run order.
         alternative_instruments.csv, table9_table10_descriptive_columns.csv
    ├── 03_hausman_fe_vs_re.R  # FE vs RE (Hausman + Mundlak)
    │    → output: results/hausman_results.csv
+   └──  04_appendix_robustness.R # run after 01 + 02 in same session; Tables 14, 15, 18,
+        # counter-protest contrasts, country breakdown, logit vs probit
    
