@@ -1,158 +1,174 @@
 # ============================================================================
-# APPENDIX ROBUSTNESS CHECKS — rethresholded v3
+# APPENDIX ROBUSTNESS CHECKS — rethresholded v3, REGION + YEAR FE
 # Author: Katie Nutley
-# Date: 23-09-2026 (recovered from unsaved RStudio buffer "Untitled10", 07-10-2026)
+# Date: 23-09-2026; re-specified 07-10-2026 (region + year FE, self-contained)
 # ============================================================================
 #
-# Run AFTER 01_model1_police_presence.R and 02_heckman_severity.R, in the same
-# R session. Uses objects those scripts create:
-#   - model1      (baseline logit, from 01)
-#   - acled_data  (prepared data incl. log_protest_load, from 02)
+# Self-contained: repeats the 01/02 data preparation, so it no longer needs
+# objects from an earlier R session. Run from the repository root.
 #
 # Produces:
-#   - Uncorrected logits on the police-present subsample (Table 14)
-#   - Alternative exclusion restrictions, with/without incumbent controls (Table 15)
-#   - Police presence by country
-#   - Counter-protest vs. left / right contrasts (reported in text)
-#   - Within-county (admin2) conditional logit (Table 18)
-#   - Logit vs. probit selection-equation comparison
+#   - Table 3   : police presence by country (descriptive, all 106,446 events)
+#   - Table 14  : uncorrected logits on police-present events, all four
+#                 partisan categories (the Heckman column comes from 02)
+#   - Table 18  : within-county estimates (admin2 + year FE, admin2-clustered),
+#                 with the main region + year model as the pooled column
+#   - Table 19  : probit vs logit selection equation (region + year FE)
+#
+# Moved elsewhere: alternative instruments (02), counter-protest contrasts (01).
 # ============================================================================
 
-library(dplyr)
+library(tidyverse)
+library(fixest)
 library(sandwich)
 library(lmtest)
-library(car)
-library(sampleSelection)
 
-stopifnot(exists("model1"), exists("acled_data"),
-          "log_protest_load" %in% names(acled_data))
+THRESHOLD <- 0.9
+FE        <- "region + year_f"
+dir.create("analysis/results", showWarnings = FALSE, recursive = TRUE)
 
+# ============================================================================
+# DATA (identical to 01 / 02)
+# ============================================================================
 
-# ---- Appendix 9, Table A: uncorrected logit on the police-present subsample ----
-pp <- dplyr::filter(acled_data, police_presence == 1)
+raw <- read_csv("data/combined/acled_merged_controls_rethresholded_v3.csv",
+                show_col_types = FALSE) %>%
+  mutate(
+    police_presence = as.integer(police_presence_prob >= THRESHOLD),
+    counter_protest = as.integer(
+      event_partisan_type_final %in% c("left_and_right", "centre_and_left", "centre_and_right")
+    ),
+    left_pure    = as.integer(event_partisan_type_final == "left"),
+    right_pure   = as.integer(event_partisan_type_final == "right"),
+    unknown_pure = as.integer(event_partisan_type_final == "unknown"),
+    log_dist_govt_building = log1p(dist_govt_building_m),
+    log_dist_major_road    = log1p(dist_major_road_m),
+    region = paste(country, admin1, sep = " | "),
+    year_f = factor(year)
+  ) %>%
+  group_by(country, event_date) %>%
+  mutate(protest_load = n() - 1L) %>%
+  ungroup() %>%
+  mutate(log_protest_load = log1p(protest_load))
 
-rhs <- "left_pure + right_pure + unknown_pure + counter_protest +
-        country + log_dist_govt_building + log_dist_major_road +
-        covid + is_weekend + protestor_violence"
-
-for (dv in c("arrest", "brutality")) {
-  m <- glm(as.formula(paste(dv, "~", rhs)), data = pp, family = binomial())
-  ct <- lmtest::coeftest(m, vcov = sandwich::vcovHC(m, type = "HC3"))
-  cat("\n---", dv, "(uncorrected logit) ---\n")
-  print(round(ct[c("left_pure", "right_pure",
-                   "unknown_pure", "counter_protest"), c(1, 4)], 3))
-}
-
-# ---- Appendix 9, Table B: alternative exclusion restrictions ----
-instruments <- c("log_protest_load", "n_police_stations_5km", "log_dist_police_station")
-
-for (iv in instruments) {
-  sel <- as.formula(paste("police_presence ~", rhs, "+", iv))
-  for (dv in c("arrest", "brutality")) {
-    out <- as.formula(paste(dv, "~ left_pure + right_pure + unknown_pure +
-                             counter_protest + country + log_dist_govt_building +
-                             log_dist_major_road + covid + is_weekend +
-                             protestor_violence"))
-    h <- sampleSelection::heckit(sel, out, data = acled_data, method = "2step")
-    co <- summary(h)$estimate
-    idx <- which(rownames(co) == "left_pure")[2] + 0:1   # outcome-equation rows
-    cat("\n---", iv, "/", dv, "---\n")
-    print(round(co[idx, c(1, 4)], 3))
-  }
-}
-
-rhs_sel <- paste(rhs, "+ incumbent_left + incumbent_right")
-
-for (iv in instruments) {
-  sel <- as.formula(paste("police_presence ~", rhs_sel, "+", iv))
-  for (dv in c("arrest", "brutality")) {
-    out <- as.formula(paste(dv, "~", rhs))
-    h <- sampleSelection::heckit(sel, out, data = acled_data, method = "2step")
-    co <- summary(h)$estimate
-    idx <- which(rownames(co) == "left_pure")[2] + 0:1
-    cat("\n---", iv, "/", dv, "---\n"); print(round(co[idx, c(1, 4)], 3))
-  }
-}
-
-acled_data %>%
+# ---- Table 3: presence by country (all events, before any restriction) -----
+table3 <- raw %>%
   group_by(country) %>%
-  summarise(total   = n(),
-            present = sum(police_presence),
-            pct     = round(100 * mean(police_presence), 2),
-            .groups = "drop") %>%
-  print(n = Inf)
+  summarise(total = n(), present = sum(police_presence),
+            pct = round(100 * mean(police_presence), 2), .groups = "drop")
+cat("\n=== TABLE 3: POLICE PRESENCE BY COUNTRY ===\n")
+print(table3, n = Inf)
 
-car::linearHypothesis(model1, "counter_protest - left_pure = 0", vcov = vcovHC(model1, "HC3"))
-car::linearHypothesis(model1, "counter_protest - right_pure = 0", vcov = vcovHC(model1, "HC3"))
+# ---- analysis sample: drop regions with no police-present event ------------
+acled_data <- raw %>%
+  group_by(region) %>%
+  filter(sum(police_presence) > 0) %>%
+  ungroup()
+cat("\nAnalysis sample:", nrow(acled_data), "events (dropped",
+    nrow(raw) - nrow(acled_data), ")\n")
 
-library(survival)
+partisan_vars <- c("left_pure", "right_pure", "unknown_pure", "counter_protest")
+m1_rhs  <- c(partisan_vars, "incumbent_left", "incumbent_right",
+             "log_dist_govt_building", "log_dist_major_road", "is_weekend")
+sel_rhs <- c(m1_rhs, "protestor_violence", "log_protest_load")
+out_rhs <- c(partisan_vars, "log_dist_govt_building", "log_dist_major_road",
+             "is_weekend", "protestor_violence")
 
-acled_admin2 <- dplyr::filter(acled_data, !is.na(admin2))
+mk <- function(y, rhs, fe = FE) {
+  as.formula(paste(y, "~", paste(rhs, collapse = " + "), if (!is.null(fe)) paste("|", fe)))
+}
 
-m_within <- clogit(
-  police_presence ~ left_pure + right_pure + unknown_pure + counter_protest +
-    incumbent_left + incumbent_right +
-    log_dist_govt_building + log_dist_major_road +
-    covid + is_weekend + strata(admin2),
-  data = acled_admin2)
-
-print(summary(m_within))
-
-# right - left contrast
-b  <- coef(m_within); V <- vcov(m_within)
-d  <- b["right_pure"] - b["left_pure"]
-se <- sqrt(V["right_pure","right_pure"] + V["left_pure","left_pure"] -
-             2 * V["right_pure","left_pure"])
-cat("\ndiff =", round(d, 4), " OR =", round(exp(d), 3),
-    " chisq =", round((d/se)^2, 3),
-    " p =", signif(pchisq((d/se)^2, 1, lower.tail = FALSE), 3), "\n")
-cat("events used =", m_within$nevent, " n =", m_within$n, "\n")
-
-install.packages("fixest")
-library(fixest)
-
-m_within <- feglm(
-  police_presence ~ left_pure + right_pure + unknown_pure + counter_protest +
-    incumbent_left + incumbent_right +
-    log_dist_govt_building + log_dist_major_road +
-    covid + is_weekend | admin2,
-  data = acled_admin2, family = binomial("logit"), cluster = ~admin2)
-
-summary(m_within)
-
-b  <- coef(m_within); V <- vcov(m_within)
-d  <- b["right_pure"] - b["left_pure"]
-se <- sqrt(V["right_pure","right_pure"] + V["left_pure","left_pure"] -
-             2 * V["right_pure","left_pure"])
-cat("\ndiff =", round(d, 4), " OR =", round(exp(d), 3),
-    " chisq =", round((d/se)^2, 3),
-    " p =", signif(pchisq((d/se)^2, 1, lower.tail = FALSE), 3), "\n")
-cat("obs used =", nobs(m_within), "\n")
-
-sel_rhs <- police_presence ~ left_pure + right_pure + unknown_pure + counter_protest +
-  incumbent_left + incumbent_right + country +
-  log_dist_govt_building + log_dist_major_road + covid + is_weekend +
-  protestor_violence + log_protest_load
-
-p <- glm(sel_rhs, data = acled_data, family = binomial("probit"))
-l <- glm(sel_rhs, data = acled_data, family = binomial("logit"))
-
-v <- c("left_pure", "right_pure", "unknown_pure", "counter_protest",
-       "protestor_violence", "log_protest_load")
-
-print(data.frame(
-  Variable = v,
-  Logit    = round(coef(l)[v], 4),
-  Probit   = round(coef(p)[v], 4),
-  Ratio    = round(coef(l)[v] / coef(p)[v], 2),
-  P_probit = round(summary(p)$coefficients[v, 4], 4),
-  row.names = NULL), row.names = FALSE)
-
-for (nm in c("logit", "probit")) {
-  m <- if (nm == "logit") l else p
-  V <- vcov(m); d <- coef(m)["right_pure"] - coef(m)["left_pure"]
+rl <- function(m, vc = NULL) {
+  b <- coef(m); V <- if (is.null(vc)) vcov(m) else vc
+  d  <- unname(b["right_pure"] - b["left_pure"])
   se <- sqrt(V["right_pure","right_pure"] + V["left_pure","left_pure"] -
                2 * V["right_pure","left_pure"])
-  cat(sprintf("%-7s  right - left = %+.4f  SE = %.4f  p = %.5f\n",
-              nm, d, se, 2 * pnorm(-abs(d / se))))
+  c(diff = d, se = se, OR = exp(d), chisq = (d / se)^2,
+    p = pchisq((d / se)^2, 1, lower.tail = FALSE))
 }
+
+# ============================================================================
+# TABLE 14: UNCORRECTED LOGITS ON POLICE-PRESENT EVENTS
+# ============================================================================
+
+pp <- filter(acled_data, police_presence == 1)
+
+table14 <- bind_rows(lapply(c("arrest", "brutality"), function(dv) {
+  m  <- feglm(mk(dv, out_rhs), data = pp, family = binomial("logit"), vcov = "hetero")
+  ct <- coeftable(m)[partisan_vars, ]
+  data.frame(Outcome = dv, Variable = c("Left", "Right", "Unknown", "Counter-Protest"),
+             Logit_Est = round(ct[, "Estimate"], 3), Logit_p = round(ct[, "Pr(>|z|)"], 3),
+             N = nobs(m), row.names = NULL)
+}))
+cat("\n=== TABLE 14: UNCORRECTED LOGIT (region + year FE, HC SEs) ===\n")
+print(table14, row.names = FALSE)
+
+# ============================================================================
+# TABLE 18: POOLED (MAIN) vs WITHIN-COUNTY
+# ============================================================================
+
+pooled <- glm(mk("police_presence", m1_rhs, NULL) |> update(. ~ . + factor(region) + year_f),
+              data = acled_data, family = binomial("logit"))
+v_pooled <- vcovHC(pooled, type = "HC3")
+
+ad <- filter(acled_data, !is.na(admin2))
+within_year <- feglm(mk("police_presence", m1_rhs, "admin2 + year_f"), data = ad,
+                     family = binomial("logit"), cluster = ~admin2)
+# previous within-county specification (Covid dummy instead of year FE), for reference
+ad$covid <- as.integer(ad$year %in% c(2020, 2021))
+within_covid <- feglm(mk("police_presence", c(m1_rhs, "covid"), "admin2"), data = ad,
+                      family = binomial("logit"), cluster = ~admin2)
+
+coef_se <- function(b, V) data.frame(Variable = c("Left", "Right", "Unknown", "Counter-Protest"),
+                                     Est = round(b[partisan_vars], 3),
+                                     SE  = round(sqrt(diag(V))[partisan_vars], 3), row.names = NULL)
+cat("\n=== TABLE 18: POOLED (region + year FE, HC3) ===\n")
+print(coef_se(coef(pooled), v_pooled), row.names = FALSE)
+cat("\n=== TABLE 18: WITHIN-COUNTY (admin2 + year FE, admin2-clustered) ===\n")
+print(coef_se(coef(within_year), vcov(within_year)), row.names = FALSE)
+
+kept_counties <- length(unique(ad$admin2[obs(within_year)]))
+table18_contrast <- rbind(
+  pooled            = rl(pooled, v_pooled),
+  within_year       = rl(within_year),
+  within_covid_prev = rl(within_covid))
+cat("\nRight - left contrast:\n"); print(round(table18_contrast, 4))
+cat("Pooled N:", nobs(pooled),
+    "| within-county N:", nobs(within_year), "in", kept_counties, "counties",
+    "| dropped:", nrow(ad) - nobs(within_year), "events in",
+    length(unique(ad$admin2)) - kept_counties, "counties\n")
+
+# ============================================================================
+# TABLE 19: SELECTION EQUATION, PROBIT vs LOGIT (region + year FE)
+# ============================================================================
+
+p_sel <- feglm(mk("police_presence", sel_rhs), data = acled_data,
+               family = binomial("probit"), vcov = "hetero")
+l_sel <- feglm(mk("police_presence", sel_rhs), data = acled_data,
+               family = binomial("logit"),  vcov = "hetero")
+
+v19 <- c(partisan_vars, "protestor_violence", "log_protest_load")
+table19 <- data.frame(
+  Variable = v19,
+  Logit    = round(coef(l_sel)[v19], 3),
+  Probit   = round(coef(p_sel)[v19], 3),
+  Ratio    = round(coef(l_sel)[v19] / coef(p_sel)[v19], 2),
+  P_probit = round(coeftable(p_sel)[v19, "Pr(>|z|)"], 3),
+  row.names = NULL)
+cat("\n=== TABLE 19: PROBIT vs LOGIT SELECTION EQUATION ===\n")
+print(table19, row.names = FALSE)
+rl19 <- rbind(logit = rl(l_sel), probit = rl(p_sel))
+cat("\nRight - left:\n"); print(round(rl19, 4))
+cat("Logit/probit ratio of right - left:", round(rl19["logit", "diff"] / rl19["probit", "diff"], 2),
+    "| N:", nobs(p_sel), "\n")
+
+# ============================================================================
+# SAVE
+# ============================================================================
+
+write.csv(table3,  "analysis/results/table3_presence_by_country.csv", row.names = FALSE)
+write.csv(table14, "analysis/results/table14_uncorrected_logit.csv",  row.names = FALSE)
+write.csv(table18_contrast, "analysis/results/table18_within_county_contrast.csv")
+write.csv(table19, "analysis/results/table19_probit_vs_logit.csv",    row.names = FALSE)
+
+cat("\n=== Appendix robustness complete ===\n")
