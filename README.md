@@ -61,7 +61,7 @@ Please note, I have not uploaded any of the data due to size limits, but it is a
     |── 02_heckman_severity.R # Heckman arrest/brutality; builds protest-load exclusion instrument and TOST
       → output: results/heckman_*.csv, tost_*.csv, exclusion_restriction_checks.csv,
         alternative_instruments.csv, table9_table10_descriptive_columns.csv
-   ├── 03_hausman_fe_vs_re.R  # FE vs RE (Hausman + Mundlak)
+   ├── 03_hausman_fe_vs_re.R  # FE vs RE (Hausman + Mundlak)/ replaced with 05 later? 
    │    → output: results/hausman_results.csv
    └──  04_appendix_robustness.R # run after 01 + 02 in same session; Tables 14, 15, 18,
         # counter-protest contrasts, country breakdown, logit vs probit
