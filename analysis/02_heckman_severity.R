@@ -1,66 +1,76 @@
 # ============================================================================
-# MODEL 2: RESPONSE SEVERITY (HECKMAN TWO-STEP) — rethresholded v3
+# MODEL 2: RESPONSE SEVERITY (HECKMAN TWO-STEP) — rethresholded v3,
+#          REGION + YEAR FIXED EFFECTS
 # Author: Katie Nutley
-# Date: 23-09-2026
+# Date: 23-09-2026; re-specified 07-10-2026 (region + year FE)
 # ============================================================================
 #
 # Script 2 of 2. Run 01_model1_police_presence.R first; this script repeats
-# the data preparation so it can also be run on its own.
+# the data preparation so it can also be run on its own. Run from the
+# repository root.
+#
+# SPECIFICATION CHANGE (07-10-2026)
+#   Country FE + Covid dummy replaced by region (admin1) + year fixed effects,
+#   the BIC-preferred specification in the FE grid (05_fe_specification_grid.R;
+#   Appendix "Fixed-Effects Specification and Model Selection"). The Covid
+#   dummy is absorbed by the year FE. Country FE are nested in region FE.
+#   One region with no police-present event (Melilla, 81 events) is dropped,
+#   as its events are perfectly predicted.
+#
+# ESTIMATION CHANGE
+#   sampleSelection::heckit cannot carry 72 region dummies through the
+#   bootstrap: nine regions have fewer than five police-present events, so a
+#   majority of resamples leave at least one region dummy empty in the outcome
+#   equation and the fit fails. The two steps are therefore estimated directly
+#   with fixest: (1) probit selection equation with region + year FE ->
+#   inverse Mills ratio; (2) linear outcome equation on police-present events
+#   with the IMR and the same FE. Point estimates are identical to heckit's
+#   two-step estimator; rho is computed with heckit's formula. Standard errors
+#   are bootstrapped (both steps re-estimated in every draw), as before.
 #
 # STRUCTURE
-#   Selection equation : police presence across all 106,446 events
-#                        (Model 1 specification + protestor violence + the
-#                        exclusion restriction).
+#   Selection equation : police presence across all events (Model 1
+#                        specification + protestor violence + the exclusion
+#                        restriction).
 #   Outcome equations  : arrest and brutality, observed only where police were
 #                        present. Estimated separately because the two are not
 #                        mutually exclusive. Incumbent partisanship is in the
-#                        selection equation ONLY: it addresses a confound in
-#                        deployment, and the framework (H1/H3) gives no reason
-#                        to expect national incumbency to shape officer
-#                        conduct conditional on presence.
+#                        selection equation ONLY.
 #
 # EXCLUSION RESTRICTION: same-day protest load — the logged count of other
-#   protest events in the same country on the same date. Competing demand for
-#   finite public-order resources shapes whether a unit can be spared, but not
-#   how the officers who do attend behave. Presence falls from 5.9 per cent of
-#   events on the quietest quartile of days to 2.6 per cent on the busiest.
-#   It replaces n_police_stations_5km, which failed the sensitivity check for
-#   arrest (b = +0.002, p = 0.003) — station density also measures custody
-#   capacity, which reaches arrest directly rather than only through
-#   deployment. Both alternatives are re-estimated in the robustness block.
+#   protest events in the same country on the same date (computed on all
+#   events, before any sample restriction). Competing demand for finite
+#   public-order resources shapes whether a unit can be spared, but not how
+#   the officers who do attend behave. Alternatives (station density, distance
+#   to station) are re-estimated in the robustness block.
 #
-# BRUTALITY CAVEAT (carried forward from the classifier notes): brutality is
-#   the least well-calibrated of the three labels. Roughly 45 per cent of its
-#   0.5-threshold positives sit below 0.8, driven by a wrong-actor confound
-#   (violence attributed to police that was committed by managers, civilians
-#   or other protesters), and the classifier saw only 44 hand-coded positives
-#   in training. Treat the brutality models with corresponding caution.
+# BRUTALITY CAVEAT: brutality is the least well-calibrated of the three
+#   classifier labels (wrong-actor confound; 44 hand-coded positives in
+#   training). Treat the brutality models with corresponding caution.
 #
 # ============================================================================
 
 library(tidyverse)
-library(sandwich)
-library(lmtest)
-library(sampleSelection)
+library(fixest)
 library(boot)
-library(car)
 
 THRESHOLD <- 0.9   # must match 01_model1_police_presence.R
 R_BOOT    <- 500   # 200 for a quick check, 500 for final results
+FE        <- "region + year_f"
+dir.create("analysis/results", showWarnings = FALSE, recursive = TRUE)
+dir.create("analysis/models",  showWarnings = FALSE, recursive = TRUE)
 
 # ============================================================================
 # DATA
 # ============================================================================
 
-acled_data <- read_csv(
-  "~/Documents/GitHub/Police_Response/2020-2024/acled_merged_controls_rethresholded_v3.csv",
-  show_col_types = FALSE
-)
+acled_data <- read_csv("data/combined/acled_merged_controls_rethresholded_v3.csv",
+                       show_col_types = FALSE)
 
 required <- c("police_presence_prob", "event_partisan_type_final", "arrest", "brutality",
               "protestor_violence", "n_police_stations_5km", "dist_police_station_m",
-              "event_date", "country", "is_weekend", "incumbent_left", "incumbent_right",
-              "dist_govt_building_m", "dist_major_road_m", "year")
+              "event_date", "country", "admin1", "is_weekend", "incumbent_left",
+              "incumbent_right", "dist_govt_building_m", "dist_major_road_m", "year")
 missing_vars <- setdiff(required, names(acled_data))
 if (length(missing_vars) > 0) stop("Missing from v3 file: ", paste(missing_vars, collapse = ", "))
 
@@ -73,22 +83,31 @@ acled_data <- acled_data %>%
     left_pure    = as.integer(event_partisan_type_final == "left"),
     right_pure   = as.integer(event_partisan_type_final == "right"),
     unknown_pure = as.integer(event_partisan_type_final == "unknown"),
-    covid        = as.integer(year %in% c(2020, 2021)),
     log_dist_govt_building  = log1p(dist_govt_building_m),
     log_dist_major_road     = log1p(dist_major_road_m),
-    log_dist_police_station = log1p(dist_police_station_m)
+    log_dist_police_station = log1p(dist_police_station_m),
+    region = paste(country, admin1, sep = " | "),
+    year_f = factor(year)
   ) %>%
-  # ---- exclusion restriction: same-day protest load -------------------------
+  # ---- exclusion restriction: same-day protest load (all events) ------------
   group_by(country, event_date) %>%
   mutate(protest_load = n() - 1L) %>%
   ungroup() %>%
   mutate(log_protest_load = log1p(protest_load))
 
+n_all <- nrow(acled_data)
+acled_data <- acled_data %>%
+  group_by(region) %>%
+  filter(sum(police_presence) > 0) %>%     # drops regions with no police-present event
+  ungroup()
+cat("Dropped", n_all - nrow(acled_data), "events in regions with no police-present event\n")
+
 stopifnot(sum(acled_data$counter_protest) > 0)
 
 partisan_vars <- c("left_pure", "right_pure", "unknown_pure", "counter_protest")
 
-cat("Events:", nrow(acled_data), "| police-present:", sum(acled_data$police_presence), "\n")
+cat("Events:", nrow(acled_data), "| police-present:", sum(acled_data$police_presence),
+    "| regions:", n_distinct(acled_data$region), "\n")
 cat("Arrests among police-present:", sum(acled_data$arrest[acled_data$police_presence == 1], na.rm = TRUE),
     "| brutality:", sum(acled_data$brutality[acled_data$police_presence == 1], na.rm = TRUE), "\n")
 cat("Protest load — mean:", round(mean(acled_data$protest_load), 1),
@@ -122,40 +141,55 @@ cat("\n=== SEVERITY DESCRIPTIVES ===\n")
 print(severity_desc)
 
 # ============================================================================
-# FORMULAS — single source of truth
+# SPECIFICATION — single source of truth
 # ============================================================================
 
-sel_formula <- police_presence ~
-  left_pure + right_pure + unknown_pure + counter_protest +
-  incumbent_left + incumbent_right +
-  country + log_dist_govt_building + log_dist_major_road + covid + is_weekend +
-  protestor_violence +
-  log_protest_load
+sel_rhs <- c(partisan_vars, "incumbent_left", "incumbent_right",
+             "log_dist_govt_building", "log_dist_major_road", "is_weekend",
+             "protestor_violence", "log_protest_load")
+out_rhs <- c(partisan_vars, "log_dist_govt_building", "log_dist_major_road",
+             "is_weekend", "protestor_violence")
 
-arr_formula <- arrest ~
-  left_pure + right_pure + unknown_pure + counter_protest +
-  country + log_dist_govt_building + log_dist_major_road + covid + is_weekend +
-  protestor_violence
+mk <- function(y, rhs, fe = FE) {
+  as.formula(paste(y, "~", paste(rhs, collapse = " + "), if (!is.null(fe)) paste("|", fe)))
+}
 
-brut_formula <- brutality ~
-  left_pure + right_pure + unknown_pure + counter_protest +
-  country + log_dist_govt_building + log_dist_major_road + covid + is_weekend +
-  protestor_violence
+# Two-step Heckman with fixed effects in both equations
+heck2 <- function(data, y, s_rhs = sel_rhs, o_rhs = out_rhs) {
+  sel <- feglm(mk("police_presence", s_rhs), data = data,
+               family = binomial(link = "probit"), notes = FALSE, warn = FALSE)
+  xb  <- predict(sel, newdata = data, type = "link")
+  data$imr <- dnorm(xb) / pnorm(xb)
+  keep <- data$police_presence == 1 & !is.na(data$imr)
+  pres <- data[keep, ]
+  out  <- feols(mk(y, c(o_rhs, "imr")), data = pres, notes = FALSE, warn = FALSE)
+  # rho as in sampleSelection::heckit (two-step)
+  used  <- obs(out)
+  lam   <- pres$imr[used]; xbp <- xb[keep][used]
+  b_imr <- unname(coef(out)["imr"])
+  sigma <- sqrt(mean(resid(out)^2) + b_imr^2 * mean(lam * (lam + xbp)))
+  list(selection = sel, outcome = out, rho = b_imr / sigma, sigma = sigma,
+       n_sel = nobs(sel), n_out = nobs(out))
+}
 
-cat("\nListwise-deleted observations:",
-    nrow(acled_data) - nrow(na.omit(acled_data[, all.vars(sel_formula)])), "\n")
+cat("\nListwise-deleted observations (selection):",
+    nrow(acled_data) - nrow(na.omit(acled_data[, c("police_presence", sel_rhs, "region", "year_f")])), "\n")
 
 # ============================================================================
 # INSTRUMENT STRENGTH
 # ============================================================================
 
-first_stage <- glm(sel_formula, data = acled_data, family = binomial(link = "probit"))
+first_stage <- feglm(mk("police_presence", sel_rhs), data = acled_data,
+                     family = binomial(link = "probit"), vcov = "hetero")
+first_stage_no_iv <- feglm(mk("police_presence", setdiff(sel_rhs, "log_protest_load")),
+                           data = acled_data, family = binomial(link = "probit"))
 
 cat("\n=== INSTRUMENT STRENGTH: same-day protest load ===\n")
-print(linearHypothesis(first_stage, "log_protest_load = 0"))
-print(summary(first_stage)$coefficients["log_protest_load", ])
-cat("LR chi-sq:", round(2 * (logLik(first_stage) -
-      logLik(update(first_stage, . ~ . - log_protest_load))), 2), "on 1 df\n")
+print(coeftable(first_stage)["log_protest_load", ])
+w_iv <- wald(first_stage, keep = "^log_protest_load$", print = FALSE)
+cat("Wald chi-sq:", round(w_iv$stat * w_iv$df1, 2), "on", w_iv$df1, "df\n")
+cat("LR chi-sq:", round(2 * (as.numeric(logLik(first_stage)) - as.numeric(logLik(first_stage_no_iv))), 2),
+    "on 1 df\n")
 
 # ============================================================================
 # EXCLUSION-RESTRICTION SENSITIVITY CHECKS
@@ -167,11 +201,8 @@ present_data <- filter(acled_data, police_presence == 1)
 
 exclusion_check <- function(candidate) {
   bind_rows(lapply(c("arrest", "brutality"), function(dv) {
-    f <- as.formula(paste(dv, "~ left_pure + right_pure + unknown_pure + counter_protest +",
-                          "country + log_dist_govt_building + log_dist_major_road + covid +",
-                          "is_weekend + protestor_violence +", candidate))
-    m  <- lm(f, data = present_data)
-    ct <- coeftest(m, vcov = vcovHC(m, type = "HC3"))
+    m  <- feols(mk(dv, c(out_rhs, candidate)), data = present_data, vcov = "hetero")
+    ct <- coeftable(m)
     data.frame(Instrument = candidate, Outcome = dv,
                Estimate = round(ct[candidate, "Estimate"], 5),
                p_value  = round(ct[candidate, "Pr(>|t|)"], 4), row.names = NULL)
@@ -187,55 +218,56 @@ print(exclusion_results, row.names = FALSE)
 # HECKMAN MODELS
 # ============================================================================
 
-cat("\n=== HECKMAN: ARREST ===\n")
-heck_arrest <- heckit(selection = sel_formula, outcome = arr_formula,
-                      data = acled_data, method = "2step")
-print(summary(heck_arrest))
+heck_arrest    <- heck2(acled_data, "arrest")
+heck_brutality <- heck2(acled_data, "brutality")
 
-cat("\n=== HECKMAN: BRUTALITY ===\n")
-heck_brutality <- heckit(selection = sel_formula, outcome = brut_formula,
-                         data = acled_data, method = "2step")
-print(summary(heck_brutality))
+cat("\n=== SELECTION EQUATION (probit, region + year FE, HC SEs) ===\n")
+selection_results <- as.data.frame(coeftable(heck_arrest$selection, vcov = "hetero"))
+print(round(selection_results, 4))
 
-cat("\n=== IMR (model-based; bootstrapped p below) ===\n")
-cat("Arrest    — rho:", round(heck_arrest$rho, 4), "| IMR p:",
-    round(summary(heck_arrest)$estimate["invMillsRatio", "Pr(>|t|)"], 4), "\n")
-cat("Brutality — rho:", round(heck_brutality$rho, 4), "| IMR p:",
-    round(summary(heck_brutality)$estimate["invMillsRatio", "Pr(>|t|)"], 4), "\n")
+cat("\n=== OUTCOME: ARREST (model-based SEs; bootstrapped below) ===\n")
+print(coeftable(heck_arrest$outcome, vcov = "iid"))
+cat("\n=== OUTCOME: BRUTALITY (model-based SEs; bootstrapped below) ===\n")
+print(coeftable(heck_brutality$outcome, vcov = "iid"))
+
+cat("\nN selection:", heck_arrest$n_sel, "| N outcome:", heck_arrest$n_out, "\n")
+cat("Arrest    — rho:", round(heck_arrest$rho, 4), "\n")
+cat("Brutality — rho:", round(heck_brutality$rho, 4), "\n")
 
 # ============================================================================
 # BOOTSTRAPPED STANDARD ERRORS
 # ============================================================================
-# heckit's model-based vcov is not compatible with heteroskedasticity-
-# consistent correction, so SEs are bootstrapped. The draw matrix is kept
-# because the right-left contrast needs the covariance, not just the SEs.
+# Both steps are re-estimated in every draw. The draw matrix is kept because
+# the right-left contrast needs the covariance, not just the SEs. A region
+# that happens to have no police-present event in a draw simply drops out of
+# that draw's outcome FE, so draws do not fail on sparse regions.
 
-boot_heck <- function(data, indices, selection_formula, outcome_formula, n_coef) {
-  d <- data[indices, ]
-  fit <- tryCatch(heckit(selection = selection_formula, outcome = outcome_formula,
-                         data = d, method = "2step"), error = function(e) NULL)
-  if (is.null(fit) || length(coef(fit)) != n_coef) return(rep(NA_real_, n_coef))
-  coef(fit)
+boot_heck <- function(data, indices, y, ref_names) {
+  fit <- tryCatch(heck2(data[indices, ], y), error = function(e) NULL)
+  if (is.null(fit)) return(rep(NA_real_, length(ref_names)))
+  b <- coef(fit$outcome)[ref_names]
+  if (any(is.na(b))) return(rep(NA_real_, length(ref_names)))
+  unname(b)
 }
 
-run_boot <- function(heck_model, outcome_formula, R = R_BOOT) {
+run_boot <- function(heck_model, y, R = R_BOOT) {
+  ref <- names(coef(heck_model$outcome))
   set.seed(42)
-  b <- boot(data = acled_data, statistic = boot_heck, R = R,
-            selection_formula = sel_formula, outcome_formula = outcome_formula,
-            n_coef = length(coef(heck_model)))
+  b <- boot(data = acled_data, statistic = boot_heck, R = R, y = y, ref_names = ref)
+  colnames(b$t) <- ref
   cat("Failed bootstrap draws:", sum(!complete.cases(b$t)), "of", R, "\n")
-  se <- apply(b$t, 2, sd, na.rm = TRUE); names(se) <- names(coef(heck_model))
+  se <- apply(b$t, 2, sd, na.rm = TRUE); names(se) <- ref
   list(se = se, draws = b$t)
 }
 
 cat("\nBootstrapping arrest model (R =", R_BOOT, ")...\n")
-ba <- run_boot(heck_arrest, arr_formula)
-coefs_arrest <- coef(heck_arrest); boot_se_arrest <- ba$se
+ba <- run_boot(heck_arrest, "arrest")
+coefs_arrest <- coef(heck_arrest$outcome); boot_se_arrest <- ba$se[names(coefs_arrest)]
 p_arrest <- 2 * pnorm(-abs(coefs_arrest / boot_se_arrest))
 
 cat("Bootstrapping brutality model (R =", R_BOOT, ")...\n")
-bb <- run_boot(heck_brutality, brut_formula)
-coefs_brutality <- coef(heck_brutality); boot_se_brutality <- bb$se
+bb <- run_boot(heck_brutality, "brutality")
+coefs_brutality <- coef(heck_brutality$outcome); boot_se_brutality <- bb$se[names(coefs_brutality)]
 p_brutality <- 2 * pnorm(-abs(coefs_brutality / boot_se_brutality))
 
 arrest_results <- data.frame(
@@ -249,32 +281,23 @@ brutality_results <- data.frame(
   z_value = round(coefs_brutality / boot_se_brutality, 4),
   p_value = round(p_brutality, 4), row.names = NULL)
 
-cat("\n=== ARREST (bootstrap SEs) ===\n");    print(arrest_results, row.names = FALSE)
-cat("\n=== BRUTALITY (bootstrap SEs) ===\n"); print(brutality_results, row.names = FALSE)
+cat("\n=== ARREST (bootstrap SEs; region + year FE absorbed) ===\n");    print(arrest_results, row.names = FALSE)
+cat("\n=== BRUTALITY (bootstrap SEs; region + year FE absorbed) ===\n"); print(brutality_results, row.names = FALSE)
 
-# heckit lists every predictor twice: selection block, then outcome block. The
-# SECOND occurrence of left_pure starts the outcome block. Plain name indexing
-# silently returns the selection-equation coefficient — never use it here.
-outcome_idx <- which(names(coefs_arrest) == "left_pure")[2] + 0:3
-stopifnot(identical(names(coefs_arrest)[outcome_idx], partisan_vars))
-stopifnot(identical(names(coefs_brutality)[outcome_idx], partisan_vars))
-
-imr_a <- which(names(coefs_arrest) == "invMillsRatio")
-imr_b <- which(names(coefs_brutality) == "invMillsRatio")
-cat("\nIMR, bootstrap SEs — arrest: b =", round(coefs_arrest[imr_a], 4),
-    "p =", round(p_arrest[imr_a], 4),
-    "| brutality: b =", round(coefs_brutality[imr_b], 4),
-    "p =", round(p_brutality[imr_b], 4), "\n")
+cat("\nIMR, bootstrap SEs — arrest: b =", round(coefs_arrest["imr"], 4),
+    "p =", round(p_arrest["imr"], 4),
+    "| brutality: b =", round(coefs_brutality["imr"], 4),
+    "p =", round(p_brutality["imr"], 4), "\n")
 
 heck_comparison <- bind_rows(
   data.frame(Variable = c("Left", "Right", "Unknown", "Counter-Protest"), Outcome = "Arrest",
-             Estimate = round(coefs_arrest[outcome_idx], 4),
-             SE = round(boot_se_arrest[outcome_idx], 4),
-             p_value = round(p_arrest[outcome_idx], 4), row.names = NULL),
+             Estimate = round(coefs_arrest[partisan_vars], 4),
+             SE = round(boot_se_arrest[partisan_vars], 4),
+             p_value = round(p_arrest[partisan_vars], 4), row.names = NULL),
   data.frame(Variable = c("Left", "Right", "Unknown", "Counter-Protest"), Outcome = "Brutality",
-             Estimate = round(coefs_brutality[outcome_idx], 4),
-             SE = round(boot_se_brutality[outcome_idx], 4),
-             p_value = round(p_brutality[outcome_idx], 4), row.names = NULL))
+             Estimate = round(coefs_brutality[partisan_vars], 4),
+             SE = round(boot_se_brutality[partisan_vars], 4),
+             p_value = round(p_brutality[partisan_vars], 4), row.names = NULL))
 cat("\n=== PARTISAN COEFFICIENTS, OUTCOME EQUATIONS (ref = centre) ===\n")
 print(heck_comparison, row.names = FALSE)
 
@@ -295,17 +318,17 @@ tost_z <- function(estimate, se, delta) {
 
 achieved_delta <- function(se) round(se * 2.49, 4)
 achieved_bounds <- c(
-  arrest_left     = achieved_delta(boot_se_arrest[outcome_idx[1]]),
-  arrest_right    = achieved_delta(boot_se_arrest[outcome_idx[2]]),
-  brutality_left  = achieved_delta(boot_se_brutality[outcome_idx[1]]),
-  brutality_right = achieved_delta(boot_se_brutality[outcome_idx[2]]))
+  arrest_left     = achieved_delta(boot_se_arrest[["left_pure"]]),
+  arrest_right    = achieved_delta(boot_se_arrest[["right_pure"]]),
+  brutality_left  = achieved_delta(boot_se_brutality[["left_pure"]]),
+  brutality_right = achieved_delta(boot_se_brutality[["right_pure"]]))
 print(achieved_bounds)
 delta_primary <- max(achieved_bounds)
 cat("\ndelta_primary:", delta_primary, "-> driven by:", names(which.max(achieved_bounds)), "\n")
 
 run_tost <- function(coefs, ses) bind_rows(
-  cbind(Variable = "Left",  tost_z(coefs[outcome_idx[1]], ses[outcome_idx[1]], delta_primary)),
-  cbind(Variable = "Right", tost_z(coefs[outcome_idx[2]], ses[outcome_idx[2]], delta_primary)))
+  cbind(Variable = "Left",  tost_z(coefs[["left_pure"]],  ses[["left_pure"]],  delta_primary)),
+  cbind(Variable = "Right", tost_z(coefs[["right_pure"]], ses[["right_pure"]], delta_primary)))
 
 cat("\n=== TOST vs CENTRE: ARREST ===\n")
 tost_arrest <- run_tost(coefs_arrest, boot_se_arrest); print(tost_arrest, row.names = FALSE)
@@ -314,8 +337,8 @@ tost_brutality <- run_tost(coefs_brutality, boot_se_brutality); print(tost_bruta
 
 # --- right - left: the contrast H3 is actually about -------------------------
 rl_diff <- function(coefs, draws) {
-  est <- unname(coefs[outcome_idx[2]] - coefs[outcome_idx[1]])
-  se  <- sd(draws[, outcome_idx[2]] - draws[, outcome_idx[1]], na.rm = TRUE)
+  est <- unname(coefs[["right_pure"]] - coefs[["left_pure"]])
+  se  <- sd(draws[, "right_pure"] - draws[, "left_pure"], na.rm = TRUE)
   list(est = est, se = se)
 }
 rl_a <- rl_diff(coefs_arrest, ba$draws)
@@ -332,20 +355,26 @@ print(rl_results, row.names = FALSE)
 # ============================================================================
 # ROBUSTNESS 1: NO HECKMAN CORRECTION
 # ============================================================================
+# Logit with region + year FE on police-present events. Groups with no arrest
+# (or no brutality) are perfectly predicted and dropped by feglm.
 
-logit_arrest    <- glm(arr_formula,  data = present_data, family = binomial(link = "logit"))
-logit_brutality <- glm(brut_formula, data = present_data, family = binomial(link = "logit"))
+logit_arrest    <- feglm(mk("arrest",    out_rhs), data = present_data,
+                         family = binomial(link = "logit"), vcov = "hetero")
+logit_brutality <- feglm(mk("brutality", out_rhs), data = present_data,
+                         family = binomial(link = "logit"), vcov = "hetero")
 
 compare_coefs <- function(heck_coefs, heck_p, logit_model, label) {
-  lc <- summary(logit_model)$coefficients
+  lc <- coeftable(logit_model)
   data.frame(Variable = c("Left", "Right"), Outcome = label,
-             Heck_Est = round(heck_coefs[1:2], 4), Heck_p = round(heck_p[1:2], 4),
+             Heck_Est = round(heck_coefs[c("left_pure", "right_pure")], 4),
+             Heck_p   = round(heck_p[c("left_pure", "right_pure")], 4),
              Logit_Est = round(lc[c("left_pure", "right_pure"), "Estimate"], 4),
-             Logit_p = round(lc[c("left_pure", "right_pure"), "Pr(>|z|)"], 4), row.names = NULL)
+             Logit_p   = round(lc[c("left_pure", "right_pure"), "Pr(>|z|)"], 4),
+             Logit_N   = nobs(logit_model), row.names = NULL)
 }
 comparison_table <- bind_rows(
-  compare_coefs(coefs_arrest[outcome_idx],    p_arrest[outcome_idx],    logit_arrest,    "Arrest"),
-  compare_coefs(coefs_brutality[outcome_idx], p_brutality[outcome_idx], logit_brutality, "Brutality"))
+  compare_coefs(coefs_arrest,    p_arrest,    logit_arrest,    "Arrest"),
+  compare_coefs(coefs_brutality, p_brutality, logit_brutality, "Brutality"))
 cat("\n=== ROBUSTNESS: NO-CORRECTION COMPARISON ===\n")
 cat("Heckman estimates are linear probability; logit estimates are log-odds.\n")
 cat("Compare sign and significance, not magnitude.\n")
@@ -354,23 +383,23 @@ print(comparison_table, row.names = FALSE)
 # ============================================================================
 # ROBUSTNESS 2: ALTERNATIVE INSTRUMENTS
 # ============================================================================
+# p-values here are heteroskedasticity-robust from the outcome equation and do
+# not account for the generated regressor (no bootstrap).
 
 alt_results <- bind_rows(lapply(
   c("log_protest_load", "n_police_stations_5km", "log_dist_police_station"), function(instr) {
-    sf <- update(sel_formula, as.formula(paste(". ~ . - log_protest_load +", instr)))
+    s_rhs <- c(setdiff(sel_rhs, "log_protest_load"), instr)
     bind_rows(lapply(c("arrest", "brutality"), function(dv) {
-      of <- if (dv == "arrest") arr_formula else brut_formula
-      m   <- heckit(selection = sf, outcome = of, data = acled_data, method = "2step")
-      idx <- which(names(coef(m)) == "left_pure")[2] + 0:3
-      est <- summary(m)$estimate
+      h  <- heck2(acled_data, dv, s_rhs = s_rhs)
+      ct <- coeftable(h$outcome, vcov = "hetero")
       data.frame(Instrument = instr, Outcome = dv,
                  Variable = c("Left", "Right", "Unknown", "Counter-Protest"),
-                 Estimate = round(coef(m)[idx], 4),
-                 p_model  = round(est[idx, "Pr(>|t|)"], 4),
-                 IMR_p    = round(est["invMillsRatio", "Pr(>|t|)"], 4), row.names = NULL)
+                 Estimate = round(ct[partisan_vars, "Estimate"], 4),
+                 p_hetero = round(ct[partisan_vars, "Pr(>|t|)"], 4),
+                 IMR_p    = round(ct["imr", "Pr(>|t|)"], 4), row.names = NULL)
     }))
   }))
-cat("\n=== ROBUSTNESS: ALTERNATIVE INSTRUMENTS (model-based p) ===\n")
+cat("\n=== ROBUSTNESS: ALTERNATIVE INSTRUMENTS (HC p-values) ===\n")
 print(alt_results, row.names = FALSE)
 
 # ============================================================================
@@ -378,22 +407,20 @@ print(alt_results, row.names = FALSE)
 # ============================================================================
 
 if ("log_crowd_size" %in% names(acled_data)) {
-  sf <- update(sel_formula,  . ~ . + log_crowd_size)
-  af <- update(arr_formula,  . ~ . + log_crowd_size)
-  bf <- update(brut_formula, . ~ . + log_crowd_size)
-  hac <- heckit(selection = sf, outcome = af, data = acled_data, method = "2step")
-  hbc <- heckit(selection = sf, outcome = bf, data = acled_data, method = "2step")
-  idx_c <- which(names(coef(hac)) == "left_pure")[2] + 0:3
-  stopifnot(identical(names(coef(hac))[idx_c], partisan_vars))
+  hac <- heck2(acled_data, "arrest",    s_rhs = c(sel_rhs, "log_crowd_size"),
+               o_rhs = c(out_rhs, "log_crowd_size"))
+  hbc <- heck2(acled_data, "brutality", s_rhs = c(sel_rhs, "log_crowd_size"),
+               o_rhs = c(out_rhs, "log_crowd_size"))
+  ca <- coeftable(hac$outcome, vcov = "hetero"); cb <- coeftable(hbc$outcome, vcov = "hetero")
   crowd_robustness <- data.frame(
     Variable = c("Left", "Right", "Unknown", "Counter-Protest"),
-    Arrest_Est = round(coef(hac)[idx_c], 4),
-    Arrest_p   = round(summary(hac)$estimate[idx_c, "Pr(>|t|)"], 4),
-    Brutality_Est = round(coef(hbc)[idx_c], 4),
-    Brutality_p   = round(summary(hbc)$estimate[idx_c, "Pr(>|t|)"], 4), row.names = NULL)
-  cat("\n=== ROBUSTNESS: LOGGED CROWD SIZE ADDED ===\n")
+    Arrest_Est    = round(ca[partisan_vars, "Estimate"], 4),
+    Arrest_p      = round(ca[partisan_vars, "Pr(>|t|)"], 4),
+    Brutality_Est = round(cb[partisan_vars, "Estimate"], 4),
+    Brutality_p   = round(cb[partisan_vars, "Pr(>|t|)"], 4), row.names = NULL)
+  cat("\n=== ROBUSTNESS: LOGGED CROWD SIZE ADDED (HC p-values) ===\n")
   print(crowd_robustness, row.names = FALSE)
-  write.csv(crowd_robustness, "results/heckman_crowd_size_robustness.csv", row.names = FALSE)
+  write.csv(crowd_robustness, "analysis/results/heckman_crowd_size_robustness.csv", row.names = FALSE)
 } else {
   cat("\nlog_crowd_size not found — skipping crowd-size robustness.\n")
 }
@@ -402,18 +429,19 @@ if ("log_crowd_size" %in% names(acled_data)) {
 # SAVE
 # ============================================================================
 
-write.csv(severity_desc,     "results/table9_table10_descriptive_columns.csv", row.names = FALSE)
-write.csv(exclusion_results, "results/exclusion_restriction_checks.csv",       row.names = FALSE)
-write.csv(heck_comparison,   "results/heckman_partisan_coefs.csv",             row.names = FALSE)
-write.csv(arrest_results,    "results/heckman_arrest_full.csv",                row.names = FALSE)
-write.csv(brutality_results, "results/heckman_brutality_full.csv",             row.names = FALSE)
-write.csv(comparison_table,  "results/heckman_vs_nocorrection.csv",            row.names = FALSE)
-write.csv(alt_results,       "results/alternative_instruments.csv",            row.names = FALSE)
+write.csv(severity_desc,     "analysis/results/table9_table10_descriptive_columns.csv", row.names = FALSE)
+write.csv(exclusion_results, "analysis/results/exclusion_restriction_checks.csv",       row.names = FALSE)
+write.csv(selection_results, "analysis/results/heckman_selection_equation.csv")
+write.csv(heck_comparison,   "analysis/results/heckman_partisan_coefs.csv",             row.names = FALSE)
+write.csv(arrest_results,    "analysis/results/heckman_arrest_full.csv",                row.names = FALSE)
+write.csv(brutality_results, "analysis/results/heckman_brutality_full.csv",             row.names = FALSE)
+write.csv(comparison_table,  "analysis/results/heckman_vs_nocorrection.csv",            row.names = FALSE)
+write.csv(alt_results,       "analysis/results/alternative_instruments.csv",            row.names = FALSE)
 write.csv(bind_rows(cbind(Outcome = "Arrest",    Test = "vs centre", tost_arrest),
                     cbind(Outcome = "Brutality", Test = "vs centre", tost_brutality)),
-          "results/tost_equivalence.csv", row.names = FALSE)
-write.csv(rl_results,        "results/tost_right_minus_left.csv",              row.names = FALSE)
-saveRDS(heck_arrest,    "models/heckman_arrest.rds")
-saveRDS(heck_brutality, "models/heckman_brutality.rds")
+          "analysis/results/tost_equivalence.csv", row.names = FALSE)
+write.csv(rl_results,        "analysis/results/tost_right_minus_left.csv",              row.names = FALSE)
+saveRDS(heck_arrest,    "analysis/models/heckman_arrest.rds")
+saveRDS(heck_brutality, "analysis/models/heckman_brutality.rds")
 
 cat("\n=== Model 2 complete ===\n")
