@@ -1,4 +1,4 @@
-# Police_Response
+# Selective Non-Securitisation
 
 Replication pipeline for *Selective Non-Securitisation: A Cross-National Quantitative Analysis of Police Response to Political Protest in France, Germany, Italy, Spain and the United Kingdom* (K. Nutley, Harvard University/ University of St Andrews).
 
