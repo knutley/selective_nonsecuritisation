@@ -1,0 +1,17 @@
+# Data (deposited separately)
+data/
+external_data/
+response_classification/roberta/model/police_severity_classifier_roberta_v3/model.safetensors
+
+# Regenerated outputs
+analysis/results/
+analysis/models/
+results/
+models/
+
+# R / OS clutter
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
