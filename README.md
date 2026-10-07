@@ -32,7 +32,7 @@ This README lays out the pipeline in run order.
       ├── acled_classified_severity_v3_2020_2024.csv # dataset with RoBERTa classification, but no thresholding yet!
       ├── acled_classified_severity_v3_rethresholded.csv # final response classification dataset w/ rethresholded RoBERTa
       ├── acled_merged_controls.csv # an older control dataset that I rely on b/c I didn't want to re-query OSM 
-      └── acled_merged_controls_rethresholded_b3.csv # finalised dataset with partisanship, response, and controls 
+      └── acled_merged_controls_rethresholded_v3.csv # finalised dataset with partisanship, response, and controls 
 4. response_classification/
     ├── algorithmic_presence_2020-2024.R # algorithmic detection of additional police responses only 
     │    → output: acled_classified_police_presence_2020_2024.csv
