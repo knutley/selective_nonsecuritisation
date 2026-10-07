@@ -13,7 +13,7 @@ This README lays out the pipeline in run order.
      paginated API calls; was done iteratively
    → output: acled_all_countries_combined_2020_2024.csv
 2. partisan_classification/{country}/
-   ├── {country}_acled_partisan_classification_2020_2024.R # script classifying actor partisanship
+   ├── {country}_partisan_classification_2020_2024.R # script classifying actor partisanship
    │    → output: {country}_acled_partisan_classification_2020_2024.csv,
    │              {country}_acled_classified_actors_2020_2024.csv
    └── {country}_acled_partisan_class_nlp_2020_2024.R # script applying BART MNLI
