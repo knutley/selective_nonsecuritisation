@@ -4,6 +4,8 @@ Replication pipeline for *Selective Non-Securitisation: A Cross-National Quantit
 
 This README lays out the pipeline in run order. 
 
+Please note, I have not uploaded any of the data due to size limits, but it is available on request. 
+
 ## Pipeline order
 
 ```
