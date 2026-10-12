@@ -16,8 +16,8 @@ Please note, I have not uploaded any of the data due to size limits, but it is a
    → output: acled_all_countries_combined_2020_2024.csv
 2. partisan_classification/{country}/
    ├── {country}_partisan_classification_2020_2024.R # script classifying actor partisanship
-   │    → output: {country}_acled_partisan_classification_2020_2024.csv,
-   │              {country}_acled_classified_actors_2020_2024.csv
+       → output: {country}_acled_partisan_classification_2020_2024.csv,
+                 {country}_acled_classified_actors_2020_2024.csv
    └── {country}_acled_partisan_class_nlp_2020_2024.R # script applying BART MNLI
    → output: {country}_acled_partisan_classification_bootstrapped{pre}_2020_2024.csv, # this was iterative, so this is just the penultimate iteration
              {country}_acled_partisan_classification_bootstrapped{post}_2020_2024.csv
@@ -62,7 +62,7 @@ Please note, I have not uploaded any of the data due to size limits, but it is a
       → output: results/heckman_*.csv, tost_*.csv, exclusion_restriction_checks.csv,
         alternative_instruments.csv, table9_table10_descriptive_columns.csv
    ├── 03_hausman_fe_vs_re.R  # FE vs RE (Hausman + Mundlak)/ replaced with 05 later? 
-   │    → output: results/hausman_results.csv
+        → output: results/hausman_results.csv
    ├──  04_appendix_robustness.R # run after 01 + 02 in same session; Tables 14, 15, 18,
         # counter-protest contrasts, country breakdown, logit vs probit
    └──   05_fe_specification_grid.R
