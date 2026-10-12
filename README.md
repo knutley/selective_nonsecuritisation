@@ -63,6 +63,7 @@ Please note, I have not uploaded any of the data due to size limits, but it is a
         alternative_instruments.csv, table9_table10_descriptive_columns.csv
    ├── 03_hausman_fe_vs_re.R  # FE vs RE (Hausman + Mundlak)/ replaced with 05 later? 
    │    → output: results/hausman_results.csv
-   └──  04_appendix_robustness.R # run after 01 + 02 in same session; Tables 14, 15, 18,
+   ├──  04_appendix_robustness.R # run after 01 + 02 in same session; Tables 14, 15, 18,
         # counter-protest contrasts, country breakdown, logit vs probit
-   
+   └──   05_fe_specification_grid.R
+      → output: tableA_fe_grid_presence.tex, tableB_fe_grid_se.tex, tableC_fe_grid_severity.tex
